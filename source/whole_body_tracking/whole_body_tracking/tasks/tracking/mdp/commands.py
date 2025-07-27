@@ -51,18 +51,71 @@ class MotionLoader:
         return self._body_ang_vel_w[:, self._body_indexes]
 
 
-class MotionCommand(CommandTerm):
-    cfg: MotionCommandCfg
+class RobotStateCommand(CommandTerm):
+    """Simple command term (doesn't actually command) that exposes robot proprioceptive state."""
 
+    cfg: RobotStateCommandCfg
     def __init__(self, cfg: MotionCommandCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
 
         self.robot: Articulation = env.scene[cfg.asset_name]
         self.robot_ref_body_index = self.robot.body_names.index(self.cfg.reference_body)
-        self.motion_ref_body_index = self.cfg.body_names.index(self.cfg.reference_body)
         self.body_indexes = torch.tensor(self.robot.find_bodies(self.cfg.body_names, preserve_order=True)[0],
                                          dtype=torch.long, device=self.device)
 
+    @property
+    def _update_command(self):
+        """No update required since we only read the current state."""
+        pass
+
+    @property
+    def robot_joint_pos(self) -> torch.Tensor:
+        return self.robot.data.joint_pos
+
+    @property
+    def robot_joint_vel(self) -> torch.Tensor:
+        return self.robot.data.joint_vel
+
+    @property
+    def robot_body_pos_w(self) -> torch.Tensor:
+        return self.robot.data.body_pos_w[:, self.body_indexes]
+
+    @property
+    def robot_body_quat_w(self) -> torch.Tensor:
+        return self.robot.data.body_quat_w[:, self.body_indexes]
+
+    @property
+    def robot_body_lin_vel_w(self) -> torch.Tensor:
+        return self.robot.data.body_lin_vel_w[:, self.body_indexes]
+
+    @property
+    def robot_body_ang_vel_w(self) -> torch.Tensor:
+        return self.robot.data.body_ang_vel_w[:, self.body_indexes]
+
+    @property
+    def robot_ref_pos_w(self) -> torch.Tensor:
+        return self.robot.data.body_pos_w[:, self.robot_ref_body_index]
+
+    @property
+    def robot_ref_quat_w(self) -> torch.Tensor:
+        return self.robot.data.body_quat_w[:, self.robot_ref_body_index]
+
+    @property
+    def robot_ref_lin_vel_w(self) -> torch.Tensor:
+        return self.robot.data.body_lin_vel_w[:, self.robot_ref_body_index]
+
+    @property
+    def robot_ref_ang_vel_w(self) -> torch.Tensor:
+        return self.robot.data.body_ang_vel_w[:, self.robot_ref_body_index]
+
+
+class MotionCommand(RobotStateCommand):
+    cfg: MotionCommandCfg
+
+    def __init__(self, cfg: MotionCommandCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+
+        self.motion_ref_body_index = self.cfg.body_names.index(self.cfg.reference_body)
         self.motion = MotionLoader(self.cfg.motion_file, self.body_indexes, device=self.device)
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.body_pos_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 3, device=self.device)
@@ -122,46 +175,6 @@ class MotionCommand(CommandTerm):
     def ref_ang_vel_w(self) -> torch.Tensor:
         return self.motion.body_ang_vel_w[self.time_steps, self.motion_ref_body_index]
 
-    @property
-    def robot_joint_pos(self) -> torch.Tensor:
-        return self.robot.data.joint_pos
-
-    @property
-    def robot_joint_vel(self) -> torch.Tensor:
-        return self.robot.data.joint_vel
-
-    @property
-    def robot_body_pos_w(self) -> torch.Tensor:
-        return self.robot.data.body_pos_w[:, self.body_indexes]
-
-    @property
-    def robot_body_quat_w(self) -> torch.Tensor:
-        return self.robot.data.body_quat_w[:, self.body_indexes]
-
-    @property
-    def robot_body_lin_vel_w(self) -> torch.Tensor:
-        return self.robot.data.body_lin_vel_w[:, self.body_indexes]
-
-    @property
-    def robot_body_ang_vel_w(self) -> torch.Tensor:
-        return self.robot.data.body_ang_vel_w[:, self.body_indexes]
-
-    @property
-    def robot_ref_pos_w(self) -> torch.Tensor:
-        return self.robot.data.body_pos_w[:, self.robot_ref_body_index]
-
-    @property
-    def robot_ref_quat_w(self) -> torch.Tensor:
-        return self.robot.data.body_quat_w[:, self.robot_ref_body_index]
-
-    @property
-    def robot_ref_lin_vel_w(self) -> torch.Tensor:
-        return self.robot.data.body_lin_vel_w[:, self.robot_ref_body_index]
-
-    @property
-    def robot_ref_ang_vel_w(self) -> torch.Tensor:
-        return self.robot.data.body_ang_vel_w[:, self.robot_ref_body_index]
-
     def _update_metrics(self):
         self.metrics["error_ref_pos"] = torch.norm(self.ref_pos_w - self.robot_ref_pos_w, dim=-1)
         self.metrics["error_ref_rot"] = quat_error_magnitude(self.ref_quat_w, self.robot_ref_quat_w)
@@ -211,9 +224,8 @@ class MotionCommand(CommandTerm):
                                         soft_joint_pos_limits[:, :, 0],
                                         soft_joint_pos_limits[:, :, 1])
         self.robot.write_joint_state_to_sim(joint_pos[env_ids], joint_vel[env_ids], env_ids=env_ids)
-        self.robot.write_root_state_to_sim(torch.cat(
-            [root_pos[env_ids], root_ori[env_ids],
-             root_lin_vel[env_ids], root_ang_vel[env_ids]], dim=-1), env_ids=env_ids)
+        self.robot.write_root_state_to_sim(torch.cat([root_pos[env_ids], root_ori[env_ids], root_lin_vel[env_ids], root_ang_vel[env_ids]], dim=-1), 
+                                           env_ids=env_ids)
 
     def _update_command(self):
         self.time_steps += 1
@@ -276,15 +288,21 @@ class MotionCommand(CommandTerm):
 
 
 @configclass
-class MotionCommandCfg(CommandTermCfg):
+class RobotStateCommandCfg(CommandTermCfg):
+    """Configuration for robot state command."""
+
+    class_type: type = RobotStateCommand
+
+    asset_name: str = MISSING
+    reference_body: str = MISSING
+    body_names: list[str] = MISSING
+
+@configclass
+class MotionCommandCfg(RobotStateCommandCfg):
     """Configuration for the motion command."""
     class_type: type = MotionCommand
 
-    asset_name: str = MISSING
-
     motion_file: str = MISSING
-    reference_body: str = MISSING
-    body_names: list[str] = MISSING
 
     pose_range: dict[str, tuple[float, float]] = {}
     velocity_range: dict[str, tuple[float, float]] = {}
